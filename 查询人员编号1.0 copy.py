@@ -1,30 +1,104 @@
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 import requests
 import threading
+import queue
 import datetime
 import natsort
 import re
 import json
+from login_test import LoginSystem
 
-class Application(tk.Frame):
-    SEARCH_URL = "http://127.0.0.1/ViewHrmsEmp/SetSearch"
-    GET_ALL_URL = "http://127.0.0.1/ViewHrmsEmp/GetAll"
-    COOKIE = "td_cookie=3026703652; td_cookie=2448498669; ASP.NET_SessionId=swja5045cfabukbdjehoh455; CheckCode=9I7P"
 
+class LoginFrame(tk.Frame):
     def __init__(self, master=None):
         super().__init__(master)
-        self.master = master
-        self.master.title("查询编号段最大值")
-        self.pack()
+        # 创建LoginSystem类的实例对象
+        self.login_system = LoginSystem()
+        self.init_ui()
+    
+    def init_ui(self):
+        # 创建窗口
+        self.master.title("Login")
+
+        #创建用户框
+        self.username_label = tk.Label(self, text="Username:")
+        self.username_label.pack()
+        self.username_entry = tk.Entry(self)
+        self.username_entry.pack()
+
+
+        self.password_label = tk.Label(self, text="Password:")
+        self.password_label.pack()
+        self.password_entry = tk.Entry(self, show="*")
+        self.password_entry.pack()
+
+        self.remember_var = tk.BooleanVar(value=False)
+        self.remember_checkbox = tk.Checkbutton(self, text="记住我", variable=self.remember_var)
+        self.remember_checkbox.pack()
+
+        self.login_button = tk.Button(self, text="Login", command=self.on_login_button_clicked)
+        self.login_button.pack()
+
+        # 放置窗口在屏幕中心
+        screen_width = self.master.winfo_screenwidth()
+        screen_height = self.master.winfo_screenheight()
+        window_width = 500
+        window_height = 400
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.master.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    #登录按钮点击事件
+    def on_login_button_clicked(self):
+            # 获取用户名和密码
+            username = self.username_entry.get()
+            password = self.password_entry.get()
+            remember = self.remember_var.get()
+
+            # 在新线程中进行登录操作
+            login_thread = threading.Thread(target=self.do_login, args=(remember, username, password, self.on_login_result))
+            login_thread.start()
+
+    #登录界面
+    def do_login(self, remember, username, password, callback):
+        # 进行登录操作
+        success = self.login_system.run(remember, username, password)
+        callback(success)
+
+    #登录成功后的函数
+    def on_login_result(self, success):
+        print(success)
+        if success:
+            self.master.after(0, self.switch_to_new_frame, self.login_system.cookies)
+        else:
+            messagebox.showwarning("Login failed", "账号或密码输入有误")
+
+    def switch_to_new_frame(self, login_cookie):
+            self.master.destroy() # close the login window
+            new_frame = SearchFrame(login_cookie)
+            new_frame.master.title("查询编号段最大值")
+            new_frame.pack()
+
+class SearchFrame(tk.Frame):
+    SEARCH_URL = "http://127.0.0.1/ViewHrmsEmp/SetSearch"
+    GET_ALL_URL = "http://127.0.0.1/ViewHrmsEmp/GetAll"
+
+    def __init__(self, login_cookie=None,master=None):
+        super().__init__(master)
+        self.login_cookie = login_cookie
         self.default_values = self.get_default_emp_no()
+        self.queue = queue.Queue()
         self.create_widgets()
+        self.process_queue()
+
+
 
     #创建界面
     def create_widgets(self):
         # 展示预先的编号查询结果
         self.show_table()
-
         # Create query frame
         self.query_frame = tk.Frame(self.master)
         self.query_frame.pack(side="bottom")
@@ -40,9 +114,20 @@ class Application(tk.Frame):
         self.result_label = tk.Label(self.query_frame, text="")
         self.result_label.grid(row=1, column=0, columnspan=3)
 
+        # 放置窗口在屏幕中心
+        screen_width = self.master.winfo_screenwidth()
+        screen_height = self.master.winfo_screenheight()
+        window_width = 500
+        window_height = 400
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.master.geometry(f"{window_width}x{window_height}+{x}+{y}")
+    
+
     #预先展示结果表格
     def show_table(self):
         self.master.title("校园卡号查询")
+
         # 设置主题
         style = ttk.Style()
         style.theme_use("clam")  # 可以尝试不同的主题，如'themed', 'alt', 'default', 'classic', 'vista'
@@ -65,10 +150,35 @@ class Application(tk.Frame):
         # 展示Treeview
         self.tree.pack(fill=tk.BOTH, expand=True)
 
-        # Populate Treeview with sample data
+        # 创建队列
+        self.queue = queue.Queue()
+
+        # 开启线程
+        threading.Thread(target=self.populate_treeview, daemon=True).start()
+    
+    def populate_treeview(self):
         for i, value in enumerate(self.default_values):
-            with requests.Session() as session:
-                self.tree.insert("", tk.END, values=(i,value, self.get_max_emp_no(value)))
+            max_emp_no = self.get_max_emp_no(value)
+            # 将数据添加到队列中
+            self.queue.put((i, value, max_emp_no))
+        # 添加结束标记
+        self.queue.put(None)
+
+    def process_queue(self):
+        try:
+            while True:
+                # 从队列中取出数据，插入到 Treeview 中
+                item = self.queue.get_nowait()
+                if item is None:
+                    break
+                i, value, max_emp_no = item
+                self.tree.insert("", tk.END, values=(i, value, max_emp_no))
+                self.queue.task_done()
+        except queue.Empty:
+            pass
+
+        # 在 100 毫秒后再次调用 process_queue，以避免占用太多 CPU 资源
+        self.master.after(100, self.process_queue)
 
     #获取人员编号
     def get_emp_no(self, pvalue0,limit=1,session=None):
@@ -81,7 +191,7 @@ class Application(tk.Frame):
             payload = {"start": 0, "limit": limit, "sort": "EmpNo", "dir": "DESC"}
             querystring = {"hqlQuery": "null"}
             headers = {
-                "cookie": self.COOKIE,
+                "cookie": self.login_cookie,
                 "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
                 "Connection": "keep-alive",
@@ -145,8 +255,6 @@ class Application(tk.Frame):
         year = str(datetime.datetime.now().year)
         year2 = year[2:]
         month = str(datetime.datetime.now().month)
-        #临时卡[1+年份末两位……]、教工子女卡[4+年份末两位……]、初中物业卡[5+年份末两位……]、高中物业卡[7+年份末两位……]、高中教师卡[8+年份末两位……]、初中教工卡[9+年份末两位……]
-        #高中部学生卡[年份四位+530]、初中学生卡[年份四位+班级两位……]
         default_list = ["1"+year2, "4"+year2, "5"+year2,\
                        "7"+year2, "8"+year2, "9"+year2,
                        year+"530", year]
@@ -167,6 +275,13 @@ class Application(tk.Frame):
             number = str(int(number) + 1)
             # 返回处理后的字符串
             return f"{prefix}{number}"
-root = tk.Tk()
-app = Application(master=root)
-app.mainloop()
+
+class Application(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.login_frame = LoginFrame(self)
+        self.login_frame.pack()
+
+if __name__ == "__main__":
+    app = Application()
+    app.mainloop()
